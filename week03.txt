@@ -1,0 +1,67 @@
+基于 errgroup 实现一个 http server 的启动和关闭 ，以及 linux signal 信号的注册和处理，要保证能够一个退出，全部注销退出。
+
+
+package main
+
+import (
+	"context"
+	"log"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+
+	"github.com/pkg/errors"
+	"golang.org/x/sync/errgroup"
+)
+
+func main() {
+	group, ctx := errgroup.WithContext(context.Background())
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/test", func(w http.ResponseWriter, r *http.Request) {
+		//do something
+	})
+
+	// 服务错误退出
+	serviceOut := make(chan struct{})
+	mux.HandleFunc("/quit", func(w http.ResponseWriter, r *http.Request) {
+		serviceOut <- struct{}{}
+	})
+
+	service := http.Server{
+		Handler: mux,
+		Addr:    ":8080",
+	}
+
+	// 服务
+	group.Go(func() error {
+		return service.ListenAndServe()
+	})
+
+	group.Go(func() error {
+		select {
+		case <-ctx.Done():
+			log.Println("errgroup exit")
+		case <-serviceOut:
+			log.Println("serviceOut")
+		}
+
+		log.Println("shutting down server...")
+		return service.Shutdown(ctx)
+	})
+
+	group.Go(func() error {
+		osSig := make(chan os.Signal, 0)
+		signal.Notify(osSig, syscall.SIGINT, syscall.SIGTERM)
+
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case sig := <-osSig:
+			return errors.Errorf("get os signal: %v", sig)
+		}
+	})
+	group.Wait()
+
+}
